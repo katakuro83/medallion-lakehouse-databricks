@@ -118,3 +118,69 @@ resources:
       email_notifications:
         on_failure:
           - data-engineering@example.com
+
+# Setup Guide
+
+## Option A Local development & testing (no Databricks required)
+
+Useful for iterating on the data quality logic and transformation code before running on a real cluster.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+pytest tests/ -v
+```
+
+This runs a local `SparkSession` — no cloud resources needed — and validates the DQ framework in `src/utils/data_quality.py`.
+
+## Option B — Running on Databricks
+
+### 1. Prerequisites
+- A Databricks workspace with **Unity Catalog** enabled
+- A catalog/schema structure: `main.bronze`, `main.silver`, `main.gold` (or adjust the table names in each script to match your naming convention)
+- A Volume for raw data and checkpoints, e.g. `/Volumes/main/lakehouse/raw/` and `/Volumes/main/lakehouse/checkpoints/`
+
+### 2. Load sample data
+Upload the contents of `data/raw/orders_cdc/` to your raw Volume path:
+```
+/Volumes/main/lakehouse/raw/orders_cdc/batch_001.json
+/Volumes/main/lakehouse/raw/orders_cdc/batch_002.json
+/Volumes/main/lakehouse/raw/orders_cdc/batch_003.json
+```
+(Via the Databricks UI: **Catalog → Volumes → Upload**, or via the CLI: `databricks fs cp -r data/raw/orders_cdc dbfs:/Volumes/main/lakehouse/raw/orders_cdc`.)
+
+### 3. Import the repo
+Connect this GitHub repo as a **Databricks Repo** (Workspace → Repos → Add Repo), so `src/` is importable exactly as structured.
+
+### 4. Enable Change Data Feed on Silver
+Before running `build_gold_aggregates.py` for the first time, ensure the Silver table has CDF enabled the bootstrap logic in `apply_cdc_silver.py` creates the table without it, so set it explicitly:
+```sql
+ALTER TABLE main.silver.orders_current
+SET TBLPROPERTIES (delta.enableChangeDataFeed = true);
+```
+
+### 5. Run the pipeline
+Either run each script as a notebook cell / job task in order:
+```
+src/bronze/ingest_bronze.py
+src/silver/apply_cdc_silver.py
+src/gold/build_gold_aggregates.py
+```
+...or deploy the full pipeline as a scheduled Workflow using `jobs/databricks_job.yml` (Databricks Asset Bundles):
+```bash
+databricks bundle deploy
+databricks bundle run medallion_lakehouse_pipeline
+```
+
+### 6. Verify
+```sql
+SELECT * FROM main.bronze.orders_cdc_raw;
+SELECT * FROM main.silver.orders_current;
+SELECT * FROM main.silver.orders_quarantine;   -- should contain the O2005 null customer_id row
+SELECT * FROM main.gold.daily_sales_summary;
+SELECT * FROM main.gold.customer_ltv;
+```
+
+The quarantine table should contain exactly one row (`O2005`, from `batch_003.json`) that's the deliberately invalid record included in the sample data to demonstrate the DQ gate working end to end.
