@@ -26,7 +26,7 @@ Bronze/Silver/Gold lakehouse on **Databricks** with schema enforcement, data qua
 | **Silver** | Deduplicated, validated, current-state tables | Delta | `MERGE INTO` applying CDC operations (insert/update/delete) by sequence number |
 | **Gold** | Aggregated, business level tables for dashboards/reporting | Delta | Incremental aggregation, `OPTIMIZE` + `ZORDER` |
 
-See [`architecture/architecture.md`](architecture/architecture.md) for the full design rationale, including how CDC apply changes and data quality quarantine work.
+See Architecture Deep Dive for the full design rationale, including how CDC apply changes and data quality quarantine work.
 
 ---
 
