@@ -1,0 +1,36 @@
+Create sample CDC JSON batch files, including a deliberately bad record for DQ demo.
+
+bash
+
+cat > /home/medallion-lakehouse/data/raw/orders_cdc/batch_001.json << 'EOF'
+{"order_id": "O2001", "customer_id": "C101", "product_id": "P001", "quantity": 2, "order_status": "placed", "operation": "INSERT", "sequence_num": 1, "event_ts": "2024-01-10T09:00:00Z"}
+{"order_id": "O2002", "customer_id": "C102", "product_id": "P004", "quantity": 1, "order_status": "placed", "operation": "INSERT", "sequence_num": 1, "event_ts": "2024-01-10T09:01:00Z"}
+{"order_id": "O2003", "customer_id": "C103", "product_id": "P002", "quantity": 1, "order_status": "placed", "operation": "INSERT", "sequence_num": 1, "event_ts": "2024-01-10T09:02:00Z"}
+EOF
+
+cat > /home/medallion-lakehouse/data/raw/orders_cdc/batch_002.json << 'EOF'
+{"order_id": "O2001", "customer_id": "C101", "product_id": "P001", "quantity": 2, "order_status": "shipped", "operation": "UPDATE", "sequence_num": 2, "event_ts": "2024-01-11T10:00:00Z"}
+{"order_id": "O2004", "customer_id": "C101", "product_id": "P006", "quantity": 3, "order_status": "placed", "operation": "INSERT", "sequence_num": 1, "event_ts": "2024-01-11T10:05:00Z"}
+{"order_id": "O2002", "customer_id": "C102", "product_id": "P004", "quantity": 1, "order_status": "cancelled", "operation": "DELETE", "sequence_num": 2, "event_ts": "2024-01-11T10:10:00Z"}
+EOF
+
+cat > /home/medallion-lakehouse/data/raw/orders_cdc/batch_003.json << 'EOF'
+{"order_id": "O2001", "customer_id": "C101", "product_id": "P001", "quantity": 2, "order_status": "delivered", "operation": "UPDATE", "sequence_num": 3, "event_ts": "2024-01-13T08:00:00Z"}
+{"order_id": "O2003", "customer_id": "C103", "product_id": "P002", "quantity": 1, "order_status": "shipped", "operation": "UPDATE", "sequence_num": 2, "event_ts": "2024-01-13T08:15:00Z"}
+{"order_id": "O2005", "customer_id": null, "product_id": "P003", "quantity": 1, "order_status": "placed", "operation": "INSERT", "sequence_num": 1, "event_ts": "2024-01-13T08:20:00Z"}
+EOF
+
+echo "note: batch_003's O2005 has a null customer_id on purpose -- it demonstrates the DQ quarantine path" > /home/medallion-lakehouse/data/raw/orders_cdc/README.txt
+
+ls -la /home/medallion-lakehouse/data/raw/orders_cdc/
+
+Output
+
+total 24
+drwxr-xr-x 2 root root 4096 Aug  1 13:54 .
+drwxr-xr-x 3 root root 4096 Aug  1 13:53 ..
+-rw-r--r-- 1 root root  100 Aug  1 13:54 README.txt
+-rw-r--r-- 1 root root  558 Aug  1 13:54 batch_001.json
+-rw-r--r-- 1 root root  562 Aug  1 13:54 batch_002.json
+-rw-r--r-- 1 root root  560 Aug  1 13:54 batch_003.json
+Done
