@@ -1,0 +1,58 @@
+Bronze layer ingestion script using Auto Loader pattern
+"""
+ingest_bronze.py
+
+Ingests raw CDC event files into the Bronze Delta table using
+Databricks Auto Loader (cloudFiles). Schema is explicit
+(see src/utils/schemas.py); anything that doesn't conform is
+captured in `_rescued_data` rather than breaking the pipeline.
+
+Run this as a Databricks notebook/job cell, or adapt the entry point
+for a Databricks Workflow task.
+
+Expected source path: a Volume or cloud storage path containing
+newline-delimited JSON CDC batches, e.g.
+/Volumes/main/lakehouse/raw/orders_cdc/
+"""
+
+from pyspark.sql import SparkSession, functions as F
+
+from src.utils.schemas import ORDERS_CDC_SCHEMA
+
+RAW_PATH = "/Volumes/main/lakehouse/raw/orders_cdc"
+CHECKPOINT_PATH = "/Volumes/main/lakehouse/checkpoints/bronze_orders_cdc"
+BRONZE_TABLE = "main.bronze.orders_cdc_raw"
+
+
+def ingest_bronze(spark: SparkSession):
+    raw_stream = (
+        spark.readStream.format("cloudFiles")
+        .option("cloudFiles.format", "json")
+        .option("cloudFiles.schemaLocation", CHECKPOINT_PATH)
+        .option("rescuedDataColumn", "_rescued_data")  # captures anything outside the declared schema
+        .schema(ORDERS_CDC_SCHEMA)
+        .load(RAW_PATH)
+    )
+
+    enriched = (
+        raw_stream
+        .withColumn("_ingested_at", F.current_timestamp())
+        .withColumn("_source_file", F.col("_metadata.file_path"))
+    )
+
+    query = (
+        enriched.writeStream
+        .format("delta")
+        .outputMode("append")
+        .option("checkpointLocation", CHECKPOINT_PATH)
+        .trigger(availableNow=True)   # process everything currently available, then stop (batch-style)
+        .toTable(BRONZE_TABLE)
+    )
+
+    query.awaitTermination()
+    print(f"Bronze ingestion complete -> {BRONZE_TABLE}")
+
+
+if __name__ == "__main__":
+    spark = SparkSession.builder.appName("ingest_bronze").getOrCreate()
+    ingest_bronze(spark)
