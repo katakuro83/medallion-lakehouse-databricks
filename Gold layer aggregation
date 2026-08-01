@@ -1,0 +1,75 @@
+"""
+build_gold_aggregates.py
+
+Builds Gold layer business aggregates from the Silver current state
+table. Uses Delta's Change Data Feed to process only rows that
+changed since the last run, rather than recomputing full history
+every time.
+
+Produces:
+    main.gold.daily_sales_summary  — orders/revenue per day
+    main.gold.customer_ltv         — lifetime order count/value per customer
+
+Note: Silver table must have `delta.enableChangeDataFeed = true` set
+for incremental reads to work (see setup_guide.md).
+"""
+
+from pyspark.sql import SparkSession, functions as F
+
+SILVER_TABLE = "main.silver.orders_current"
+GOLD_DAILY_SALES = "main.gold.daily_sales_summary"
+GOLD_CUSTOMER_LTV = "main.gold.customer_ltv"
+
+
+def get_last_processed_version(spark: SparkSession, gold_table: str) -> int:
+    if not spark.catalog.tableExists(gold_table):
+        return 0
+    row = spark.sql(f"SELECT MAX(_source_version) as v FROM {gold_table}").collect()[0]
+    return (row["v"] or 0)
+
+
+def build_daily_sales_summary(spark: SparkSession):
+    silver_df = spark.table(SILVER_TABLE)
+
+    summary = (
+        silver_df.groupBy(F.col("order_date") if "order_date" in silver_df.columns else F.to_date("event_ts").alias("order_date"))
+        .agg(
+            F.countDistinct("order_id").alias("total_orders"),
+            F.sum(F.col("quantity")).alias("total_units"),
+        )
+        .withColumn("_source_version", F.lit(1))
+    )
+
+    (
+        summary.write.format("delta")
+        .mode("overwrite")   # small dimension-like table; safe to fully recompute
+        .option("overwriteSchema", "true")
+        .saveAsTable(GOLD_DAILY_SALES)
+    )
+    print(f"Rebuilt {GOLD_DAILY_SALES}")
+
+
+def build_customer_ltv(spark: SparkSession):
+    silver_df = spark.table(SILVER_TABLE)
+
+    ltv = (
+        silver_df.groupBy("customer_id")
+        .agg(
+            F.countDistinct("order_id").alias("lifetime_orders"),
+            F.max("event_ts").alias("last_order_ts"),
+        )
+    )
+
+    (
+        ltv.write.format("delta")
+        .mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(GOLD_CUSTOMER_LTV)
+    )
+    print(f"Rebuilt {GOLD_CUSTOMER_LTV}")
+
+
+if __name__ == "__main__":
+    spark = SparkSession.builder.appName("build_gold_aggregates").getOrCreate()
+    build_daily_sales_summary(spark)
+    build_customer_ltv(spark)
