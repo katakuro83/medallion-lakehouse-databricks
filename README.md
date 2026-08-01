@@ -10,11 +10,11 @@ Bronze/Silver/Gold lakehouse on **Databricks** with schema enforcement, data qua
 
 ```
 ┌────────────────┐    ┌───────────────────┐    ┌────────────────────┐    ┌────────────────────┐
-│  CDC event feed │ -> │   BRONZE (raw)     │ -> │   SILVER (clean)    │ -> │   GOLD (curated)     │
-│  (insert/update/│    │  Auto Loader        │    │  MERGE INTO (CDC     │    │  Business aggregates │
-│   delete)       │    │  schema enforced    │    │  apply changes),     │    │  ready for BI         │
-│                  │    │  + rescued data col │    │  DQ checks +         │    │                       │
-│                  │    │                     │    │  quarantine          │    │                       │
+│ CDC event feed │ -> │   BRONZE (raw)    │ -> │   SILVER (clean)   │ -> │   GOLD (curated)   │
+│ (insert/update/│    │  Auto Loader      │    │  MERGE INTO (CDC   │    │Business aggregates │
+│  delete)       │    │  schema enforced  │    │  apply changes),   │    │  ready for BI      │
+│                │    │+ rescued data col │    │  DQ checks +       │    │                    │
+│                │    │                   │    │  quarantine        │    │                    │
 └────────────────┘    └───────────────────┘    └────────────────────┘    └────────────────────┘
 ```
 
