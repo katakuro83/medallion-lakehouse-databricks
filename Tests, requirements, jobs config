@@ -1,0 +1,74 @@
+"""
+test_data_quality.py
+
+Local unit tests for the DQ framework using a local SparkSession —
+no Databricks cluster required. This is what you'd wire into CI
+(GitHub Actions) to catch regressions in the quality checks
+themselves before they ever run against real data.
+"""
+
+import pytest
+from pyspark.sql import SparkSession
+
+from src.utils.data_quality import (
+    check_not_null,
+    check_unique,
+    check_accepted_values,
+    run_orders_cdc_quality_suite,
+)
+
+
+@pytest.fixture(scope="module")
+def spark():
+    return (
+        SparkSession.builder
+        .master("local[2]")
+        .appName("dq-tests")
+        .getOrCreate()
+    )
+
+
+def test_check_not_null_flags_missing_values(spark):
+    df = spark.createDataFrame(
+        [("O1", "C1"), ("O2", None)],
+        ["order_id", "customer_id"],
+    )
+    result = check_not_null(df, ["customer_id"])
+    assert result.failed_count == 1
+    assert result.passed_count == 1
+
+
+def test_check_unique_flags_duplicates(spark):
+    df = spark.createDataFrame(
+        [("O1",), ("O1",), ("O2",)],
+        ["order_id"],
+    )
+    result = check_unique(df, "order_id")
+    assert result.failed_count == 2  # both rows sharing the duplicate key are flagged
+    assert result.passed_count == 1
+
+
+def test_check_accepted_values_flags_invalid_entries(spark):
+    df = spark.createDataFrame(
+        [("INSERT",), ("UPSERT",)],  # "UPSERT" is not a valid operation
+        ["operation"],
+    )
+    result = check_accepted_values(df, "operation", {"INSERT", "UPDATE", "DELETE"})
+    assert result.failed_count == 1
+    assert result.passed_count == 1
+
+
+def test_full_suite_quarantines_null_customer_id(spark):
+    df = spark.createDataFrame(
+        [
+            ("O1", "C1", "INSERT", 1, "placed"),
+            ("O2", None, "INSERT", 1, "placed"),  # should be quarantined
+        ],
+        ["order_id", "customer_id", "operation", "sequence_num", "order_status"],
+    )
+    clean_df, quarantine_df = run_orders_cdc_quality_suite(df)
+
+    assert clean_df.count() == 1
+    assert quarantine_df is not None
+    assert quarantine_df.count() == 1
+    assert quarantine_df.collect()[0]["order_id"] == "O2"
