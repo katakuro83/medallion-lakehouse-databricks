@@ -1,4 +1,4 @@
-# Medallion Lakehouse Architecture
+# Medallion Lakehouse Architecture on Databricks
 
 Bronze/Silver/Gold lakehouse on **Databricks** with schema enforcement, data quality checks, and incremental (CDC) processing.
 
