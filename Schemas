@@ -1,0 +1,153 @@
+"""
+schemas.py
+
+Explicit schema definitions used across the pipeline. Defining schemas
+up front (rather than relying on inferSchema) is what makes Bronze
+"schema enforced" any incoming field that doesn't match this shape
+is captured by Auto Loader's rescuedDataColumn instead of silently
+breaking or being dropped.
+"""
+
+from pyspark.sql.types import (
+    StructType,
+    StructField,
+    StringType,
+    IntegerType,
+    TimestampType,
+)
+
+# Raw CDC event schema, as emitted by the (simulated) upstream
+# change data capture feed.
+ORDERS_CDC_SCHEMA = StructType([
+    StructField("order_id", StringType(), nullable=False),
+    StructField("customer_id", StringType(), nullable=True),
+    StructField("product_id", StringType(), nullable=True),
+    StructField("quantity", IntegerType(), nullable=True),
+    StructField("order_status", StringType(), nullable=True),
+    StructField("operation", StringType(), nullable=False),      # INSERT / UPDATE / DELETE
+    StructField("sequence_num", IntegerType(), nullable=False),  # monotonic per order_id, for CDC ordering
+    StructField("event_ts", TimestampType(), nullable=True),
+])
+
+# Allowed values for validation
+VALID_OPERATIONS = {"INSERT", "UPDATE", "DELETE"}
+VALID_ORDER_STATUSES = {"placed", "shipped", "delivered", "cancelled"}
+
+"""
+data_quality.py
+
+A small, dependency free data quality framework used at the Silver
+layer. Each check function takes a DataFrame and returns
+(passing_df, failing_df, failure_reason) so callers can route bad
+rows to a quarantine table instead of either dropping them silently
+or letting them corrupt the mainline table.
+
+This is intentionally simple (no external DQ library) so the logic
+is fully transparent and easy to extend. For larger projects, this
+same pattern maps directly onto Delta Live Tables `@dlt.expect_*`
+decorators or Great Expectations checkpoints.
+"""
+
+from dataclasses import dataclass
+from typing import List
+
+from pyspark.sql import DataFrame, functions as F
+
+from .schemas import VALID_OPERATIONS, VALID_ORDER_STATUSES
+
+
+@dataclass
+class DQResult:
+    check_name: str
+    passed_count: int
+    failed_count: int
+    failing_rows: DataFrame
+
+
+def check_not_null(df: DataFrame, columns: List[str]) -> DQResult:
+    condition = None
+    for col in columns:
+        c = F.col(col).isNull()
+        condition = c if condition is None else (condition | c)
+
+    failing = df.filter(condition).withColumn(
+        "_dq_failure_reason", F.lit(f"null value in required column(s): {columns}")
+    )
+    passing_count = df.count() - failing.count()
+
+    return DQResult(
+        check_name=f"not_null({columns})",
+        passed_count=passing_count,
+        failed_count=failing.count(),
+        failing_rows=failing,
+    )
+
+
+def check_unique(df: DataFrame, key_column: str) -> DQResult:
+    dupe_keys = (
+        df.groupBy(key_column)
+        .count()
+        .filter(F.col("count") > 1)
+        .select(key_column)
+    )
+    failing = df.join(dupe_keys, on=key_column, how="inner").withColumn(
+        "_dq_failure_reason", F.lit(f"duplicate value in {key_column}")
+    )
+    passing_count = df.count() - failing.count()
+
+    return DQResult(
+        check_name=f"unique({key_column})",
+        passed_count=passing_count,
+        failed_count=failing.count(),
+        failing_rows=failing,
+    )
+
+
+def check_accepted_values(df: DataFrame, column: str, allowed: set) -> DQResult:
+    failing = df.filter(~F.col(column).isin(list(allowed))).withColumn(
+        "_dq_failure_reason", F.lit(f"{column} not in allowed set: {allowed}")
+    )
+    passing_count = df.count() - failing.count()
+
+    return DQResult(
+        check_name=f"accepted_values({column})",
+        passed_count=passing_count,
+        failed_count=failing.count(),
+        failing_rows=failing,
+    )
+
+
+def run_orders_cdc_quality_suite(df: DataFrame):
+    """
+    Runs the full DQ suite for the orders CDC stream and returns
+    (clean_df, quarantine_df).
+
+    A row is quarantined if it fails ANY check quarantine_df
+    aggregates rows + failure reasons from every check that failed.
+    """
+    checks = [
+        check_not_null(df, ["order_id", "customer_id", "operation"]),
+        check_accepted_values(df, "operation", VALID_OPERATIONS),
+        check_accepted_values(df, "order_status", VALID_ORDER_STATUSES | {None}),
+    ]
+
+    failing_frames = [c.failing_rows for c in checks if c.failed_count > 0]
+
+    if not failing_frames:
+        return df, None
+
+    quarantine_df = failing_frames[0]
+    for f in failing_frames[1:]:
+        quarantine_df = quarantine_df.unionByName(f, allowMissingColumns=True)
+
+    quarantine_df = quarantine_df.dropDuplicates(["order_id", "sequence_num", "operation"])
+
+    bad_keys = quarantine_df.select("order_id", "sequence_num", "operation").distinct()
+    clean_df = df.join(
+        bad_keys,
+        on=["order_id", "sequence_num", "operation"],
+        how="left_anti",
+    )
+
+    return clean_df, quarantine_df
+
