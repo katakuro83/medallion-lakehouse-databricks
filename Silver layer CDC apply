@@ -1,0 +1,74 @@
+Silver layer CDC apply changes with data quality quarantine
+"""
+apply_cdc_silver.py
+
+Reads new Bronze records, runs the data quality suite, quarantines
+failing rows, and applies the remaining CDC events (INSERT/UPDATE/
+DELETE) into the Silver current state table using Delta MERGE INTO,
+keyed by sequence_num so out of order events can't overwrite newer
+state.
+"""
+
+from delta.tables import DeltaTable
+from pyspark.sql import SparkSession
+
+from src.utils.data_quality import run_orders_cdc_quality_suite
+
+BRONZE_TABLE = "main.bronze.orders_cdc_raw"
+SILVER_TABLE = "main.silver.orders_current"
+QUARANTINE_TABLE = "main.silver.orders_quarantine"
+
+
+def apply_cdc_silver(spark: SparkSession):
+    bronze_df = spark.table(BRONZE_TABLE)
+
+    # --- Data quality gate ---
+    clean_df, quarantine_df = run_orders_cdc_quality_suite(bronze_df)
+
+    if quarantine_df is not None and quarantine_df.count() > 0:
+        (
+            quarantine_df.write.format("delta")
+            .mode("append")
+            .option("mergeSchema", "true")
+            .saveAsTable(QUARANTINE_TABLE)
+        )
+        print(f"Quarantined {quarantine_df.count()} row(s) -> {QUARANTINE_TABLE}")
+
+    if clean_df.count() == 0:
+        print("No clean rows to merge this run.")
+        return
+
+    # --- CDC apply changes via MERGE INTO ---
+    if not spark.catalog.tableExists(SILVER_TABLE):
+        # First run: bootstrap the table from INSERT events only
+        initial = clean_df.filter("operation != 'DELETE'").dropDuplicates(["order_id"])
+        initial.write.format("delta").saveAsTable(SILVER_TABLE)
+        print(f"Bootstrapped {SILVER_TABLE} with {initial.count()} row(s)")
+        return
+
+    silver_table = DeltaTable.forName(spark, SILVER_TABLE)
+
+    (
+        silver_table.alias("target")
+        .merge(
+            source=clean_df.alias("source"),
+            condition="target.order_id = source.order_id",
+        )
+        .whenMatchedDelete(
+            condition="source.operation = 'DELETE' AND source.sequence_num > target.sequence_num"
+        )
+        .whenMatchedUpdateAll(
+            condition="source.operation != 'DELETE' AND source.sequence_num > target.sequence_num"
+        )
+        .whenNotMatchedInsertAll(
+            condition="source.operation != 'DELETE'"
+        )
+        .execute()
+    )
+
+    print(f"CDC apply complete -> {SILVER_TABLE}")
+
+
+if __name__ == "__main__":
+    spark = SparkSession.builder.appName("apply_cdc_silver").getOrCreate()
+    apply_cdc_silver(spark)
