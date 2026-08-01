@@ -72,3 +72,49 @@ def test_full_suite_quarantines_null_customer_id(spark):
     assert quarantine_df is not None
     assert quarantine_df.count() == 1
     assert quarantine_df.collect()[0]["order_id"] == "O2"
+
+# Databricks Workflow definition (Databricks Asset Bundle style)
+# Deploy with: databricks bundle deploy
+# Or recreate manually as a Workflow in the Databricks UI using these
+# task definitions and dependencies.
+
+resources:
+  jobs:
+    medallion_lakehouse_pipeline:
+      name: medallion_lakehouse_pipeline
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"   # daily at 06:00
+        timezone_id: "UTC"
+
+      job_clusters:
+        - job_cluster_key: main_cluster
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: "Standard_DS3_v2"
+            num_workers: 2
+            spark_conf:
+              spark.databricks.delta.preview.enabled: "true"
+
+      tasks:
+        - task_key: bronze_ingest
+          job_cluster_key: main_cluster
+          spark_python_task:
+            python_file: "./src/bronze/ingest_bronze.py"
+
+        - task_key: silver_apply_cdc
+          depends_on:
+            - task_key: bronze_ingest
+          job_cluster_key: main_cluster
+          spark_python_task:
+            python_file: "./src/silver/apply_cdc_silver.py"
+
+        - task_key: gold_aggregates
+          depends_on:
+            - task_key: silver_apply_cdc
+          job_cluster_key: main_cluster
+          spark_python_task:
+            python_file: "./src/gold/build_gold_aggregates.py"
+
+      email_notifications:
+        on_failure:
+          - data-engineering@example.com
