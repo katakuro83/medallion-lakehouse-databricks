@@ -64,25 +64,6 @@ medallion-lakehouse/
 
 ---
 
-## Quick Start
-
-Full walkthrough in [`docs/setup_guide.md`](docs/setup_guide.md). Summary:
-
-1. **Local dev/test** (no Databricks needed):
-   ```bash
-   pip install -r requirements.txt
-   pytest tests/
-   ```
-2. **On Databricks:**
-   - Upload `data/raw/orders_cdc/` to a Volume or cloud storage path (e.g. `/Volumes/main/lakehouse/raw/orders_cdc`).
-   - Import `src/` into a Databricks Repo (Git-linked).
-   - Run `src/bronze/ingest_bronze.py` as a notebook/job — creates `bronze.orders_cdc_raw`.
-   - Run `src/silver/apply_cdc_silver.py` — applies CDC into `silver.orders_current`, quarantines bad rows into `silver.orders_quarantine`.
-   - Run `src/gold/build_gold_aggregates.py` — builds `gold.daily_sales_summary` and `gold.customer_ltv`.
-   - Or deploy `jobs/databricks_job.yml` as a **Databricks Workflow** to run all three as a scheduled, dependency-ordered pipeline.
-
----
-
 ## Possible Extensions
 
 - Replace file based CDC batches with a live feed (Debezium → Kafka → Auto Loader)
@@ -94,4 +75,4 @@ Full walkthrough in [`docs/setup_guide.md`](docs/setup_guide.md). Summary:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT
