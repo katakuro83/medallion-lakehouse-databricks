@@ -1,0 +1,51 @@
+# Architecture Deep Dive
+
+## Why Medallion (Bronze/Silver/Gold)
+
+Each layer has a single, well defined responsibility. This keeps failures isolated and lets different consumers read from the layer that matches their needs: data engineers debug from Bronze, analysts query Gold.
+
+## Bronze: Raw, Schema Enforced Landing
+
+- Ingested with **Databricks Auto Loader** (`cloudFiles` format), which incrementally and exactly once processes new files as they land, tracking progress via checkpoints no need to track "what's already been loaded" manually.
+- Schema is **explicit** (`src/utils/schemas.py`), not inferred. Inferred schemas drift silently as upstream systems change; explicit schemas fail loudly (or route to `_rescued_data`) instead.
+- `rescuedDataColumn` catches any fields that don't match the expected schema (extra columns, type mismatches) into a JSON string column, so a source system change never causes silent data loss or a hard pipeline failure it becomes visible and queryable.
+- Bronze is **append-only** and keeps full history, including duplicate CDC events this layer is the audit trail / replay source.
+
+## Silver: CDC Apply Changes + Data Quality
+
+### Applying CDC correctly
+Raw CDC events include an `operation` (`INSERT`/`UPDATE`/`DELETE`) and a `sequence_num` (or timestamp) indicating event order. Naively appending these to a table would leave duplicate/out of order rows. Instead, `apply_cdc_silver.py` uses Delta's `MERGE INTO`:
+
+```sql
+MERGE INTO silver.orders_current AS target
+USING staged_changes AS source
+ON target.order_id = source.order_id
+WHEN MATCHED AND source.sequence_num > target.sequence_num AND source.operation = 'DELETE'
+  THEN DELETE
+WHEN MATCHED AND source.sequence_num > target.sequence_num
+  THEN UPDATE SET *
+WHEN NOT MATCHED AND source.operation != 'DELETE'
+  THEN INSERT *
+```
+
+The `sequence_num` comparison is what makes this safe for **out-of-order delivery** a late-arriving stale update can't overwrite a newer state.
+
+### Data quality as a gate, not a report
+Before the merge, every micro batch runs through `src/utils/data_quality.py`, which checks:
+- **Not-null** on required fields (`order_id`, `customer_id`)
+- **Uniqueness** of `order_id` within the batch
+- **Referential integrity** `customer_id` exists in the customer dimension
+- **Accepted values** `operation` is one of `INSERT/UPDATE/DELETE`
+
+Rows that fail are **quarantined** (written to `silver.orders_quarantine` with a failure reason) rather than either (a) silently dropped or (b) allowed to corrupt the mainline table. This means a bad upstream batch degrades gracefully instead of taking down the pipeline or polluting Gold.
+
+## Gold: Incremental Business Aggregates
+
+Gold tables (`daily_sales_summary`, `customer_ltv`) are rebuilt **incrementally** only partitions touched by the latest Silver changes are recomputed, using Delta's change data feed (`readChangeFeed`) or a watermark column, rather than a full table recompute on every run. This keeps Gold refresh fast and cheap as history grows.
+
+Gold tables are `OPTIMIZE`d with `ZORDER` on the columns most queried by BI tools (e.g., `order_date`, `customer_id`) to keep dashboard queries fast.
+
+## Orchestration
+
+`jobs/databricks_job.yml` defines a Databricks Workflow with three tasks (`bronze_ingest` → `silver_apply_cdc` → `gold_aggregates`), each depending on the previous succeeding. This is the Databricks native equivalent of an Airflow DAG no external orchestrator needed when everything lives on the platform.
+
