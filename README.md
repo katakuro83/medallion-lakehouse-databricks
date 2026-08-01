@@ -72,7 +72,3 @@ medallion-lakehouse/
 - Add a `_dq_metrics` Delta table so data quality trends are queryable over time, not just pass/fail per run
 
 ---
-
-## License
-
-MIT
